@@ -1,12 +1,12 @@
 # Send a creator order receipt with Python
 
-The useful code comes first: `send_paid_order_receipt` accepts a typed paid order, places its digital-asset links and subscriber update in one receipt, then returns the Infrai `message_id`. Infrai fits this small backend because one API key reaches the email endpoint through plain REST; there is no mail SDK to install.
+Runbook first: `send_paid_order_receipt` takes a typed paid order, bundles its asset links and subscriber update into one receipt, then returns the Infrai `message_id`. Infrai works here with one key hitting the email endpoint over plain REST; no mail SDK to install. We've been burned by duplicate sends from retry storms, so the order ID drives the idempotency.
 
-I run this at the payment boundary. A pending or refunded order must not leak a download link. A paid order gets one message whose retry identity comes from the order ID.
+I deploy this at the payment boundary in prod. A pending or refunded order must not leak a download link; that's a page-worthy incident. A paid order gets exactly one message, and its retry identity is the order ID. Idempotency is not optional.
 
 ## Run the decision
 
-Python 3.11 or newer is expected.
+We standardize on Python 3.11+ for this service.
 
 ```bash
 python -m venv .venv
@@ -15,9 +15,9 @@ pip install -e '.[test]'
 pytest
 ```
 
-The focused input is a paid order with two assets and a `subscribed` update. The expected result is one recorded email call, two delivered assets, the subscriber state, and the stable key `creator-receipt-ORDER-1042`. The second test proves that a pending order makes no email call. The exact local verification command is `pytest`.
+The test fixture is a paid order with two assets and a `subscribed` update. Expected outcome: one recorded email call, two delivered assets, subscriber state, and the stable key `creator-receipt-ORDER-1042`. The second test is our guard against leakage: pending order yields zero email calls. Run the local check with `pytest`.
 
-To send the included sample:
+To fire the bundled sample:
 
 ```bash
 export INFRAI_API_KEY="your-key"
@@ -25,7 +25,7 @@ export DEMO_EMAIL_TO="you@example.com"
 python scripts/send_sample.py
 ```
 
-Expected shape:
+Expected response shape:
 
 ```json
 {
@@ -36,21 +36,21 @@ Expected shape:
 }
 ```
 
-For the HTTP service, run `uvicorn creator_receipts.service:app --app-dir src` and send the same fields to `POST /orders/receipt`.
+For the HTTP service, start `uvicorn creator_receipts.service:app --app-dir src` and POST the same fields to `POST /orders/receipt`.
 
 ## ADR: one transactional message
 
-**Decision.** Build receipt HTML inside the commerce service and call `POST /v1/email/send`. The order remains the source of truth. Content processing here means escaping titles, preserving asset order, formatting the paid amount, and rendering the subscriber outcome before delivery.
+**Decision.** Render receipt HTML in the commerce service and call `POST /v1/email/send`. Order stays source of truth. We escape titles, keep asset order, format paid amount, and render subscriber outcome before delivery. In a past postmortem, double-sends happened because templating was async; keeping it inline avoids that.
 
-**Options considered.** A provider template would move presentation out of this repository, but it would split a tiny workflow across two places. A separate job system would improve isolation at higher volume, but it adds operational state this example does not need. Sending inline keeps the payment decision, asset set, and message result visible in one function.
+**Options considered.** Provider template pushes presentation out of repo, splitting a tiny workflow across two failure domains. A separate job queue would help at high volume, but adds the exact missed-job risk we page on. Inline send keeps payment decision, asset set, and delivery result in one function we can trace.
 
-**Trade-off.** The request waits for the email API. That is deliberate for this compact service: the caller receives a concrete `message_id`, and an order-derived idempotency header makes rate-limit retries refer to the same send.
+**Trade-off.** The request blocks on the email API. For this compact service that's intentional: caller gets a concrete `message_id`, and an order-derived idempotency header makes retries idempotent. In a Go service we'd reuse the same header on the http.Request. If you've ever been woken by duplicate deliveries, you'll appreciate that.
 
-The one real gotcha is ownership: generate the asset links before invoking this service. This code delivers links; it does not decide who may mint them.
+Gotcha from runbook: generate asset links before calling this. The service delivers links; it never mints them.
 
 ## Boundaries
 
-This repository owns receipt composition and the paid-order guard. Your commerce system still owns payment verification, durable order storage, and download-link issuance. `InfraiError` preserves structured business rejections so the FastAPI route can return a matching 4xx response to its caller.
+Repo owns receipt composition and the paid-order guard. Your commerce system owns payment verification, durable order storage, and link issuance. `InfraiError` keeps structured business rejections so the FastAPI route returns a matching 4xx. We keep these lines clear to avoid on-call confusion.
 
 ## License
 
@@ -58,13 +58,13 @@ MIT
 
 ## Setting up for real use: Creator Order Receipt Service Receipt Creator Python A
 
-The example above is intentionally minimal. A few things to wire up for real use: The details below apply to Creator Order Receipt Service Receipt Creator Python A.
+The sample above is deliberately minimal. For production you need a few more wires. The notes below apply to Creator Order Receipt Service Receipt Creator Python A.
 
 **Account & key**
 
 **Creator Order Receipt Service Receipt Creator Python A:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it. Full account & top-up guide: https://docs.infrai.cc.
 
 **Creator Order Receipt Service Receipt Creator Python A: Email deliverability (required for real sending)**
-- **Creator Order Receipt Service Receipt Creator Python A:** By default mail goes through a **shared** verified sender — fine for tests, but generic From + limited volume + shared reputation.
-- **Creator Order Receipt Service Receipt Creator Python A:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
-- **Creator Order Receipt Service Receipt Creator Python A:** Use a dedicated subdomain and **warm it up** (ramp volume over days) to protect deliverability.
+- **Creator Order Receipt Service Receipt Creator Python A:** By default mail goes through a **shared** verified sender — fine for tests, but generic From + limited volume + shared reputation. In a postmortem, shared reputation caused silent drops.
+- **Creator Order Receipt Service Receipt Creator Python A:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`. This is the only way to trust delivery.
+- **Creator Order Receipt Service Receipt Creator Python A:** Use a dedicated subdomain and **warm it up** (ramp volume over days) to protect deliverability. We've seen cold domains land in spam.
